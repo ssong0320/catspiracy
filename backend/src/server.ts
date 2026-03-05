@@ -39,16 +39,28 @@ const ALL_BOARD_ROOMS = [
   'bottom-left', 'bottom-mid', 'bottom-right',
 ];
 
-const CLUE_TEXT_POOL = [
-  'A paw print near the fish bowl.',
-  'Fish scales on the floor.',
-  'A napkin with fish oil.',
-  'A whisker by the sofa.',
-  'Tuna crumbs under the table.',
-  'A suspicious hair on the carpet.',
-  'Scratches on the cabinet.',
-  'A dropped collar tag.',
-  'Fish-scented breath on the window.',
+const CAT_DISPLAY_NAMES: Record<string, string> = {
+  whiskers: 'Whiskers',
+  shadow:   'Shadow',
+  mittens:  'Mittens',
+  tiger:    'Tiger',
+  luna:     'Luna',
+  oliver:   'Oliver',
+};
+
+const ALIBI_POOL = [
+  '%CAT% was spotted napping in the %ROOM% all evening — the fur impression in the cushion is still warm.',
+  'Security footage from the %ROOM% clearly shows %CAT% chasing a moth for three straight hours.',
+  '%CAT% knocked over a potted plant in the %ROOM% and spent the entire night cleaning up the soil.',
+  'Fresh paw prints throughout the %ROOM% were DNA-matched to %CAT%, who never left the area.',
+  '%CAT% was hopelessly tangled in the %ROOM% curtains and had to be rescued well past midnight.',
+  '%CAT% was caught on camera batting a bottle cap around the %ROOM% the entire evening.',
+  'A hairball found in the %ROOM% was DNA-matched to %CAT%. Clearly preoccupied with other matters.',
+  '%CAT% held an unbroken 3-hour grooming session in the %ROOM%. No time for crime.',
+  '%CAT% had been loudly demanding attention in the %ROOM% all night — multiple witnesses confirm it.',
+  '%CAT% was spotted staring intensely at a wall in the %ROOM% for hours, hunting imaginary prey.',
+  'A knocked-over glass of water in the %ROOM% perfectly matches %CAT%\'s signature chaos pattern.',
+  '%CAT% was busy yowling at nothing in the %ROOM% — the neighbours filed a noise complaint.',
 ];
 
 const ROOM_DISPLAY_NAMES: Record<string, string> = {
@@ -63,7 +75,11 @@ const ROOM_DISPLAY_NAMES: Record<string, string> = {
   'bottom-right': 'Nap Chamber',
 };
 
-type GameClueAssignment = { roomToClue: Record<string, string>; clueRoomNames: string[] };
+type GameClueAssignment = {
+  roomToClue: Record<string, string>;
+  clueRoomNames: string[];
+  roomToCatId: Record<string, string>; // which innocent cat is exonerated by this room's clue
+};
 const gameClueAssignments = new Map<string, GameClueAssignment>();
 
 function shuffle<T>(arr: T[]): T[] {
@@ -193,12 +209,21 @@ io.on('connection', (socket) => {
         },
       });
       const shuffledRooms = shuffle([...ALL_BOARD_ROOMS]).slice(0, 4);
-      const shuffledClues = shuffle([...CLUE_TEXT_POOL]).slice(0, 4);
+      const innocentCats = shuffle(CAT_IDS.filter((id) => id !== murdererCatId)).slice(0, 4);
+      const shuffledAlibis = shuffle([...ALIBI_POOL]).slice(0, 4);
       const roomToClue: Record<string, string> = {};
+      const roomToCatId: Record<string, string> = {};
       shuffledRooms.forEach((room, i) => {
-        roomToClue[room] = shuffledClues[i] ?? 'A clue was found.';
+        const catId = innocentCats[i] ?? innocentCats[0] ?? 'whiskers';
+        const catName = CAT_DISPLAY_NAMES[catId] ?? catId;
+        const roomName = ROOM_DISPLAY_NAMES[room] ?? room;
+        const alibi = (shuffledAlibis[i] ?? ALIBI_POOL[0] ?? '')
+          .replace('%CAT%', catName)
+          .replace('%ROOM%', roomName);
+        roomToClue[room] = alibi;
+        roomToCatId[room] = catId;
       });
-      gameClueAssignments.set(gameCode, { roomToClue, clueRoomNames: shuffledRooms });
+      gameClueAssignments.set(gameCode, { roomToClue, clueRoomNames: shuffledRooms, roomToCatId });
       const payload = {
         status: 'playing' as const,
         players: game.players.map((p) => ({
@@ -228,7 +253,7 @@ io.on('connection', (socket) => {
             where: { id: game.id },
             data: { status: 'lost', endedAt: new Date(), remainingSeconds: 0 },
           });
-          io.to(getRoom(gameCode)).emit('game_lost', { reason: 'time' });
+          io.to(getRoom(gameCode)).emit('game_lost', { reason: 'time', murdererCatId });
           console.log('Game lost (time):', gameCode);
         }
       }, 1000);
@@ -333,7 +358,12 @@ io.on('connection', (socket) => {
         data: { currentTurnPlayerId: nextPlayer.id },
       });
       const roomDisplay = ROOM_DISPLAY_NAMES[roomName] ?? roomName;
-      const logMessage = `${player.playerName} found a clue in ${roomDisplay}: "${clueText}"`;
+      const eliminatedCatId = assignment.roomToCatId[roomName] ?? '';
+      const eliminatedCatName = CAT_DISPLAY_NAMES[eliminatedCatId] ?? eliminatedCatId;
+      const logMessage =
+        `🔍 ${player.playerName} searched the ${roomDisplay}:\n` +
+        `"${clueText}"\n` +
+        `✅ ${eliminatedCatName} has been cleared as a suspect.`;
       io.to(getRoom(gameCode)).emit('clue_found', {
         roomName,
         clueText,
@@ -341,6 +371,7 @@ io.on('connection', (socket) => {
         currentTurnSocketId: nextPlayer.socketId,
         roomsCollected,
         logMessage,
+        eliminatedCatId,
       });
     } catch (err) {
       console.error('collect_clue error:', err);
@@ -387,32 +418,31 @@ io.on('connection', (socket) => {
         console.log('Game won:', gameCode);
         return;
       }
-      const current = game.remainingSeconds ?? 300;
-      const newSeconds = Math.max(0, current - 60);
+      // Wrong accusation = instant game over
+      stopGameTimer(gameCode);
       await prisma.game.update({
         where: { id: game.id },
-        data: { remainingSeconds: newSeconds },
+        data: { status: 'lost', endedAt: new Date(), remainingSeconds: 0 },
       });
-      const timer = gameTimers.get(gameCode);
-      if (timer) timer.remainingSeconds = newSeconds;
-      io.to(getRoom(gameCode)).emit('wrong_vote', {
-        remainingSeconds: newSeconds,
-        votedCatId: catId,
+      io.to(getRoom(gameCode)).emit('game_lost', {
+        reason: 'wrong_vote',
         voterName: player.playerName,
+        votedCatId: catId,
+        murdererCatId,
       });
-      if (newSeconds <= 0) {
-        stopGameTimer(gameCode);
-        await prisma.game.update({
-          where: { id: game.id },
-          data: { status: 'lost', endedAt: new Date(), remainingSeconds: 0 },
-        });
-        io.to(getRoom(gameCode)).emit('game_lost', { reason: 'wrong_vote' });
-        console.log('Game lost (wrong vote):', gameCode);
-      }
+      console.log('Game lost (wrong vote):', gameCode);
     } catch (err) {
       console.error('vote_suspect error:', err);
       socket.emit('vote_error', { message: 'Failed to vote' });
     }
+  });
+
+  socket.on('move_player', (data: { row?: number; col?: number }) => {
+    const gameCode = socketToGame.get(socket.id);
+    if (!gameCode) return;
+    const row = typeof data?.row === 'number' ? Math.max(0, Math.min(27, Math.floor(data.row))) : 0;
+    const col = typeof data?.col === 'number' ? Math.max(0, Math.min(27, Math.floor(data.col))) : 0;
+    socket.to(getRoom(gameCode)).emit('player_moved', { socketId: socket.id, row, col });
   });
 
   socket.on('disconnect', async () => {

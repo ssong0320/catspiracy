@@ -25,6 +25,13 @@ type GameStartedPayload = {
   clueRoomNames?: string[];
 };
 
+type LostPayload = {
+  reason?: string;
+  voterName?: string;
+  votedCatId?: string;
+  murdererCatId?: string;
+};
+
 function App() {
   const [connected, setConnected] = useState(false);
   const [playerName, setPlayerName] = useState('');
@@ -39,7 +46,10 @@ function App() {
   const [gameState, setGameState] = useState<GameStartedPayload | null>(null);
   const [gameLog, setGameLog] = useState<string>('Waiting for game to start...');
   const [winPayload, setWinPayload] = useState<{ murdererCatId: string; voterName: string } | null>(null);
+  const [lostPayload, setLostPayload] = useState<LostPayload | null>(null);
   const [minigameOpen, setMinigameOpen] = useState<{ roomName: string; gameIndex: number } | null>(null);
+  const [otherPlayers, setOtherPlayers] = useState<Record<string, { row: number; col: number }>>({});
+  const [eliminatedCatIds, setEliminatedCatIds] = useState<string[]>([]);
 
   const resetToLobby = () => {
     setGameJoined(false);
@@ -50,8 +60,11 @@ function App() {
     setGameState(null);
     setGameLog('Waiting for game to start...');
     setWinPayload(null);
+    setLostPayload(null);
     setStartError('');
     setJoinError('');
+    setEliminatedCatIds([]);
+    setOtherPlayers({});
   };
 
   useEffect(() => {
@@ -85,8 +98,9 @@ function App() {
     socket.on('game_started', (data: GameStartedPayload) => {
       setGameStatus('playing');
       setGameState({ ...data, roomsCollected: data.roomsCollected ?? [] });
+      setEliminatedCatIds([]);
       setStartError('');
-      setGameLog('Game started! Find 4 clues and identify the murderer.\n');
+      setGameLog('🐾 Game started! Walk your avatar into rooms to find clues.\n');
     });
     socket.on('clue_found', (data: {
       roomName: string;
@@ -95,6 +109,7 @@ function App() {
       currentTurnSocketId: string;
       roomsCollected: string[];
       logMessage: string;
+      eliminatedCatId: string;
     }) => {
       setGameState((prev) =>
         prev
@@ -106,6 +121,11 @@ function App() {
             }
           : null
       );
+      if (data.eliminatedCatId) {
+        setEliminatedCatIds((prev) =>
+          prev.includes(data.eliminatedCatId) ? prev : [...prev, data.eliminatedCatId]
+        );
+      }
       setGameLog((log) => log + data.logMessage + '\n');
     });
     socket.on('clue_error', (data: { message: string }) => {
@@ -119,25 +139,29 @@ function App() {
         prev ? { ...prev, remainingSeconds: data.remainingSeconds } : null
       );
     });
-    socket.on('game_lost', () => {
+    socket.on('game_lost', (data: LostPayload) => {
       setGameStatus('lost');
+      setLostPayload(data ?? {});
     });
     socket.on('game_won', (data: { murdererCatId: string; voterName: string }) => {
       setGameStatus('won');
       setWinPayload({ murdererCatId: data.murdererCatId, voterName: data.voterName });
     });
-    socket.on('wrong_vote', (data: { remainingSeconds: number; votedCatId: string; voterName: string }) => {
-      setGameState((prev) =>
-        prev ? { ...prev, remainingSeconds: data.remainingSeconds } : null
-      );
-      setGameLog(
-        (log) =>
-          log +
-          `${data.voterName} accused ${getCatDisplayName(data.votedCatId)}. Wrong! -1 minute.\n`
-      );
-    });
     socket.on('vote_error', (data: { message: string }) => {
       setGameLog((log) => log + `(Vote error: ${data.message})\n`);
+    });
+    socket.on('player_moved', (data: { socketId: string; row: number; col: number }) => {
+      setOtherPlayers((prev) => ({
+        ...prev,
+        [data.socketId]: { row: data.row, col: data.col },
+      }));
+    });
+    socket.on('player_left', (data: { id: string }) => {
+      setOtherPlayers((prev) => {
+        const next = { ...prev };
+        delete next[data.id];
+        return next;
+      });
     });
     return () => {
       socket.off('lobby_update');
@@ -149,10 +173,11 @@ function App() {
       socket.off('timer_update');
       socket.off('game_lost');
       socket.off('game_won');
-      socket.off('wrong_vote');
       socket.off('vote_error');
       socket.off('clue_found');
       socket.off('clue_error');
+      socket.off('player_moved');
+      socket.off('player_left');
     };
   }, []);
 
@@ -295,10 +320,10 @@ function App() {
     return (
       <div className="App won-screen">
         <div className="won-card">
-          <h2>You caught the murderer!</h2>
+          <h2>Case closed! 🎉</h2>
           <p>
             {winPayload.voterName} correctly identified{' '}
-            <strong>{getCatDisplayName(winPayload.murdererCatId)}</strong> as the fish thief. 🐟🔍
+            <strong>{getCatDisplayName(winPayload.murdererCatId)}</strong> as the fish thief! 🐟🔍
           </p>
           <button type="button" className="btn-play-again" onClick={resetToLobby}>
             Play again
@@ -310,11 +335,36 @@ function App() {
 
   // ——— Lost ———
   if (gameStatus === 'lost') {
+    const isWrongVote = lostPayload?.reason === 'wrong_vote';
     return (
       <div className="App lost-screen">
         <div className="lost-card">
-          <h2>Time&apos;s up!</h2>
-          <p>The fish murderer got away… 🐟</p>
+          {isWrongVote ? (
+            <>
+              <h2>Wrong accusation! 💀</h2>
+              <p>
+                <strong>{lostPayload?.voterName}</strong> falsely accused{' '}
+                <strong>{getCatDisplayName(lostPayload?.votedCatId ?? '')}</strong>.
+              </p>
+              {lostPayload?.murdererCatId && (
+                <p style={{ marginTop: 8 }}>
+                  The real culprit was{' '}
+                  <strong>{getCatDisplayName(lostPayload.murdererCatId)}</strong>. 🐟
+                </p>
+              )}
+            </>
+          ) : (
+            <>
+              <h2>Time&apos;s up! ⏰</h2>
+              <p>The detectives ran out of time.</p>
+              {lostPayload?.murdererCatId && (
+                <p style={{ marginTop: 8 }}>
+                  The culprit was{' '}
+                  <strong>{getCatDisplayName(lostPayload.murdererCatId)}</strong> all along… 🐟
+                </p>
+              )}
+            </>
+          )}
           <button type="button" className="btn-play-again" onClick={resetToLobby}>
             Play again
           </button>
@@ -333,45 +383,60 @@ function App() {
       <div className="App game-screen">
         <header className="game-header">
           <span>CATSPIRACY</span>
-          <span className="timer">
-            🕐 {minutes}:{seconds.toString().padStart(2, '0')}
-          </span>
+          <div className="game-header-right">
+            <span className={`game-timer${gameState.remainingSeconds <= 30 ? ' low-time' : ''}`}>
+              {minutes}:{seconds.toString().padStart(2, '0')}
+            </span>
+          </div>
         </header>
 
         <main className="game-main">
           <section className="game-panel suspects">
-            <h3>SUSPECTS</h3>
-            <div className="suspects-grid">
-              {gameState.catIds.map((id) => (
-                <button
-                  key={id}
-                  type="button"
-                  className="suspect-card"
-                  onClick={() => socket.emit('vote_suspect', { catId: id })}
-                  aria-label={`Vote for ${getCatDisplayName(id)}`}
-                >
+            <h3>Suspects</h3>
+            <div className="suspects-list">
+              {gameState.catIds.map((id) => {
+                const eliminated = eliminatedCatIds.includes(id);
+                return (
                   <div
-                    className="avatar"
-                    style={{ background: getCatAvatarColor(id) }}
+                    key={id}
+                    className={`suspect-row${eliminated ? ' suspect-eliminated' : ''}`}
                   >
-                    {getCatInitial(id)}
+                    <div
+                      className="avatar"
+                      style={{ background: eliminated ? '#bbb' : getCatAvatarColor(id) }}
+                    >
+                      {eliminated ? '✓' : getCatInitial(id)}
+                    </div>
+                    <span className="suspect-name">{getCatDisplayName(id)}</span>
+                    {eliminated ? (
+                      <span className="cleared-badge">CLEARED</span>
+                    ) : (
+                      <button
+                        type="button"
+                        className="accuse-btn"
+                        onClick={() => socket.emit('vote_suspect', { catId: id })}
+                        aria-label={`Accuse ${getCatDisplayName(id)}`}
+                      >
+                        Accuse
+                      </button>
+                    )}
                   </div>
-                  <div className="name">{getCatDisplayName(id)}</div>
-                </button>
-              ))}
+                );
+              })}
             </div>
-            <div className="suspect-note">
-              Clicking a suspect initiates a &quot;Vote&quot; action. Incorrect votes
-              reduce the timer by 1 minute.
-            </div>
+            <p className="suspects-note">
+              Accuse the fish thief. A wrong accusation ends the game immediately.
+            </p>
           </section>
 
           <section className="game-panel map-panel">
-            <h3>HOUSE MAP</h3>
-            <span className="clues-badge">
-              {gameState.cluesCollectedCount} / 4 CLUES FOUND
-            </span>
-            <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+            <div className="map-panel-header">
+              <h3>House Map</h3>
+              <span className="clues-badge">
+                {gameState.cluesCollectedCount} / 4 Clues Found
+              </span>
+            </div>
+            <div className="map-board">
               <BoardView
                 clueRoomNames={gameState.clueRoomNames ?? []}
                 isMyTurn={isMyTurn}
@@ -381,6 +446,10 @@ function App() {
                   const gameIndex = clueRoomNames.indexOf(roomName);
                   setMinigameOpen({ roomName, gameIndex: gameIndex >= 0 ? gameIndex : 0 });
                 }}
+                showAvatar={true}
+                mySocketId={socket.id ?? ''}
+                otherPlayers={otherPlayers}
+                onMove={(row, col) => socket.emit('move_player', { row, col })}
               />
             </div>
             {minigameOpen && (
@@ -396,7 +465,7 @@ function App() {
               />
             )}
             <p className="map-instruction">
-              Click a location, complete the mini-game to search for a clue.
+              Walk your avatar into a room to search it for clues.
             </p>
             <div>
               {isMyTurn ? (
@@ -409,25 +478,26 @@ function App() {
             </div>
           </section>
 
-          <section className="game-panel objectives">
-            <h3>CURRENT OBJECTIVE</h3>
-            <ul>
-              <li>Find 4 clues ({gameState.cluesCollectedCount}/4)</li>
-              <li>Identify the murderer before time runs out</li>
-              <li>Avoid false accusations (-1 minute penalty)</li>
-            </ul>
-            <div className="server-status">
-              {connected
-                ? 'Connected via WebSocket.'
-                : 'Disconnected.'}{' '}
-              <span className="game-id">Game #{myGameCode}</span>
-            </div>
-          </section>
+          <div className="game-right">
+            <section className="game-panel objectives">
+              <h3>Current Objective</h3>
+              <ul>
+                <li>Find 4 clues ({gameState.cluesCollectedCount}/4) to eliminate suspects</li>
+                <li>Identify the murderer before time runs out</li>
+                <li>A wrong accusation ends the game immediately</li>
+              </ul>
+            </section>
 
-          <section className="game-panel log-panel">
-            <h3>GAME LOG</h3>
-            <div className="log-content">{gameLog}</div>
-          </section>
+            <section className="game-panel log-panel">
+              <h3>Game Log</h3>
+              <div className="log-content">{gameLog}</div>
+            </section>
+
+            <div className="game-status">
+              <span className={`status-dot ${connected ? 'connected' : 'disconnected'}`} />
+              {connected ? 'Connected' : 'Disconnected'} · Game #{myGameCode}
+            </div>
+          </div>
         </main>
       </div>
     );

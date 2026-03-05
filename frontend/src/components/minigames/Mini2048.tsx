@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useEffect } from 'react';
 
-const TARGET = 256;
+const TARGET = 128;
 const GRID_SIZE = 4;
 
 function spawnTile(grid: number[][]): number[][] {
@@ -81,7 +81,12 @@ export default function Mini2048({ onWin, onCancel }: Props) {
 
   const handleKey = useCallback(
     (e: KeyboardEvent) => {
+      const isArrow = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key);
       if (won) return;
+      if (isArrow) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
       const key = e.key;
       let dir: 'left' | 'right' | 'up' | 'down' | null = null;
       if (key === 'ArrowLeft') dir = 'left';
@@ -89,7 +94,6 @@ export default function Mini2048({ onWin, onCancel }: Props) {
       if (key === 'ArrowUp') dir = 'up';
       if (key === 'ArrowDown') dir = 'down';
       if (!dir) return;
-      e.preventDefault();
       const { grid: next, changed } = move(grid, dir);
       if (!changed) return;
       setGrid(spawnTile(next));
@@ -98,8 +102,8 @@ export default function Mini2048({ onWin, onCancel }: Props) {
   );
 
   useEffect(() => {
-    window.addEventListener('keydown', handleKey);
-    return () => window.removeEventListener('keydown', handleKey);
+    window.addEventListener('keydown', handleKey, true);
+    return () => window.removeEventListener('keydown', handleKey, true);
   }, [handleKey]);
 
   if (won) {

@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState, useEffect, useRef } from "react";
 
 type RectRoom = {
   name: string;
@@ -23,14 +23,14 @@ const ROOM_LABELS: Record<string, string> = {
 
 const ROOM_COLORS: Record<string, string> = {
   "top-left":     "#ead9ff",
-  "top-mid":      "#fef4c0", 
-  "top-right":    "#ffc8d8", 
+  "top-mid":      "#fef4c0",
+  "top-right":    "#ffc8d8",
   "left-mid":     "#c8f5e2",
-  center:         "#b8e4ff", 
-  "right-mid":    "#ffd8c8", 
-  "bottom-left":  "#c8f0cc", 
+  center:         "#b8e4ff",
+  "right-mid":    "#ffd8c8",
+  "bottom-left":  "#c8f0cc",
   "bottom-mid":   "#ddd5ff",
-  "bottom-right": "#fff8c0", 
+  "bottom-right": "#fff8c0",
 };
 
 const WALL_STROKE: Record<string, string> = {
@@ -45,13 +45,53 @@ const WALL_STROKE: Record<string, string> = {
   "bottom-right": "rgba(188,158,22,0.5)",
 };
 
-type BoardViewProps = {
-  clueRoomNames?: string[];
-  isMyTurn?: boolean;
-  roomsCollected?: string[];
-  onRoomClick?: (roomName: string) => void;
-};
+// ============================================================
+// MODULE-LEVEL GRID CONSTANTS (needed in keyboard handlers)
+// ============================================================
+const GRID_SIZE = 28;
+const CORNER_SIZE = 8;
+const CENTER_ROOM_SIZE = 8;
+const CENTER_START = Math.floor((GRID_SIZE - CENTER_ROOM_SIZE) / 2); // 10
+const CENTER_END   = CENTER_START + CENTER_ROOM_SIZE - 1;             // 17
+const EDGE_ROOM_SIZE = CORNER_SIZE;
+const EDGE_START   = Math.floor((GRID_SIZE - EDGE_ROOM_SIZE) / 2);   // 10
+const EDGE_END     = EDGE_START + EDGE_ROOM_SIZE - 1;                 // 17
 
+const ROOMS: RectRoom[] = [
+  { name: "center",       color: ROOM_COLORS["center"],       r1: CENTER_START,               c1: CENTER_START,               r2: CENTER_END,                 c2: CENTER_END              },
+  { name: "top-left",     color: ROOM_COLORS["top-left"],     r1: 0,                          c1: 0,                          r2: CORNER_SIZE - 1,            c2: CORNER_SIZE - 1         },
+  { name: "top-right",    color: ROOM_COLORS["top-right"],    r1: 0,                          c1: GRID_SIZE - CORNER_SIZE,    r2: CORNER_SIZE - 1,            c2: GRID_SIZE - 1           },
+  { name: "bottom-left",  color: ROOM_COLORS["bottom-left"],  r1: GRID_SIZE - CORNER_SIZE,    c1: 0,                          r2: GRID_SIZE - 1,              c2: CORNER_SIZE - 1         },
+  { name: "bottom-right", color: ROOM_COLORS["bottom-right"], r1: GRID_SIZE - CORNER_SIZE,    c1: GRID_SIZE - CORNER_SIZE,    r2: GRID_SIZE - 1,              c2: GRID_SIZE - 1           },
+  { name: "top-mid",      color: ROOM_COLORS["top-mid"],      r1: 0,                          c1: EDGE_START,                 r2: EDGE_ROOM_SIZE - 1,         c2: EDGE_END                },
+  { name: "bottom-mid",   color: ROOM_COLORS["bottom-mid"],   r1: GRID_SIZE - EDGE_ROOM_SIZE, c1: EDGE_START,                 r2: GRID_SIZE - 1,              c2: EDGE_END                },
+  { name: "left-mid",     color: ROOM_COLORS["left-mid"],     r1: EDGE_START,                 c1: 0,                          r2: EDGE_END,                   c2: EDGE_ROOM_SIZE - 1      },
+  { name: "right-mid",    color: ROOM_COLORS["right-mid"],    r1: EDGE_START,                 c1: GRID_SIZE - EDGE_ROOM_SIZE, r2: EDGE_END,                   c2: GRID_SIZE - 1           },
+];
+
+function getRoomAt(row: number, col: number): RectRoom | null {
+  for (const room of ROOMS) {
+    if (row >= room.r1 && row <= room.r2 && col >= room.c1 && col <= room.c2) return room;
+  }
+  return null;
+}
+
+function roomCenter(room: RectRoom): { row: number; col: number } {
+  return {
+    row: Math.floor((room.r1 + room.r2) / 2),
+    col: Math.floor((room.c1 + room.c2) / 2),
+  };
+}
+
+const FISH_TANK_ROOM = ROOMS.find((r) => r.name === "center") ?? ROOMS[0]!;
+const AVATAR_START = roomCenter(FISH_TANK_ROOM);
+const ARROW_KEYS = ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"];
+// Colors for other players' avatars
+const PLAYER_COLORS = ["#2ecc71", "#e74c3c", "#3498db", "#f39c12", "#9b59b6"];
+
+// ============================================================
+// Room SVG decorations (unchanged)
+// ============================================================
 function RoomDecoration({ name }: { name: string }) {
   const s: React.CSSProperties = { width: "100%", height: "100%" };
   const ws = WALL_STROKE[name] ?? "rgba(150,120,180,0.45)";
@@ -81,7 +121,7 @@ function RoomDecoration({ name }: { name: string }) {
         </svg>
       );
 
-    case "top-mid": // Sunbeam Deck 
+    case "top-mid": // Sunbeam Deck
       return (
         <svg viewBox="0 0 100 100" style={s} preserveAspectRatio="xMidYMid meet">
           <rect x="2" y="2" width="96" height="96" fill="none" stroke={ws} strokeWidth="5" />
@@ -350,43 +390,100 @@ function RoomDecoration({ name }: { name: string }) {
   }
 }
 
+type BoardViewProps = {
+  clueRoomNames?: string[];
+  isMyTurn?: boolean;
+  roomsCollected?: string[];
+  onRoomClick?: (roomName: string) => void;
+  showAvatar?: boolean;
+  mySocketId?: string;
+  otherPlayers?: Record<string, { row: number; col: number }>;
+  onMove?: (row: number, col: number) => void;
+};
+
 export default function BoardView({
   clueRoomNames = [],
   isMyTurn = false,
   roomsCollected = [],
   onRoomClick,
+  showAvatar = false,
+  mySocketId,
+  otherPlayers = {},
+  onMove,
 }: BoardViewProps) {
-  const size = 28;
+  const [avatarPos, setAvatarPos] = useState(AVATAR_START);
+  const [isExpanded, setIsExpanded] = useState(false);
+
+  const avatarPosRef = useRef(AVATAR_START);
+  const onMoveRef = useRef(onMove);
+  const onRoomClickRef = useRef(onRoomClick);
+  const clueRoomNamesRef = useRef(clueRoomNames);
+  const isMyTurnRef = useRef(isMyTurn);
+  const roomsCollectedRef = useRef(roomsCollected);
+  onMoveRef.current = onMove;
+  onRoomClickRef.current = onRoomClick;
+  clueRoomNamesRef.current = clueRoomNames;
+  isMyTurnRef.current = isMyTurn;
+  roomsCollectedRef.current = roomsCollected;
+
+  useEffect(() => {
+    if (!showAvatar) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!ARROW_KEYS.includes(e.key)) return;
+      if (!isMyTurnRef.current) return;
+      e.preventDefault();
+
+      const prev = avatarPosRef.current;
+      const inRoom = getRoomAt(prev.row, prev.col);
+      let tr = prev.row, tc = prev.col;
+
+      if (inRoom) {
+        if (e.key === "ArrowUp")    { tr = inRoom.r1 - 1; tc = prev.col; }
+        if (e.key === "ArrowDown")  { tr = inRoom.r2 + 1; tc = prev.col; }
+        if (e.key === "ArrowLeft")  { tr = prev.row; tc = inRoom.c1 - 1; }
+        if (e.key === "ArrowRight") { tr = prev.row; tc = inRoom.c2 + 1; }
+      } else {
+        if (e.key === "ArrowUp")    tr = prev.row - 1;
+        if (e.key === "ArrowDown")  tr = prev.row + 1;
+        if (e.key === "ArrowLeft")  tc = prev.col - 1;
+        if (e.key === "ArrowRight") tc = prev.col + 1;
+      }
+
+      if (tr < 0 || tr >= GRID_SIZE || tc < 0 || tc >= GRID_SIZE) return;
+
+      const targetRoom = getRoomAt(tr, tc);
+      const next = targetRoom ? roomCenter(targetRoom) : { row: tr, col: tc };
+
+      avatarPosRef.current = next;
+      setAvatarPos(next);
+      onMoveRef.current?.(next.row, next.col);
+
+      if (
+        targetRoom &&
+        isMyTurnRef.current &&
+        clueRoomNamesRef.current.includes(targetRoom.name) &&
+        !roomsCollectedRef.current.includes(targetRoom.name) &&
+        onRoomClickRef.current
+      ) {
+        setTimeout(() => onRoomClickRef.current?.(targetRoom.name), 120);
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [showAvatar]);
+
+  useEffect(() => {
+    if (!isExpanded) return;
+    const onEsc = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setIsExpanded(false);
+    };
+    window.addEventListener("keydown", onEsc);
+    return () => window.removeEventListener("keydown", onEsc);
+  }, [isExpanded]);
+
+  const size = GRID_SIZE;
   const total = size * size;
-
-  const cornerSize = 8;
-
-  const centerRoomSize = 8;
-  const centerStart = Math.floor((size - centerRoomSize) / 2);
-  const centerEnd   = centerStart + centerRoomSize - 1;
-
-  const edgeRoomSize = cornerSize;
-  const edgeStart    = Math.floor((size - edgeRoomSize) / 2);
-  const edgeEnd      = edgeStart + edgeRoomSize - 1;
-
-  const rooms: RectRoom[] = [
-    { name: "center",       color: ROOM_COLORS["center"],       r1: centerStart,         c1: centerStart,         r2: centerEnd,           c2: centerEnd           },
-    { name: "top-left",     color: ROOM_COLORS["top-left"],     r1: 0,                   c1: 0,                   r2: cornerSize - 1,      c2: cornerSize - 1      },
-    { name: "top-right",    color: ROOM_COLORS["top-right"],    r1: 0,                   c1: size - cornerSize,   r2: cornerSize - 1,      c2: size - 1            },
-    { name: "bottom-left",  color: ROOM_COLORS["bottom-left"],  r1: size - cornerSize,   c1: 0,                   r2: size - 1,            c2: cornerSize - 1      },
-    { name: "bottom-right", color: ROOM_COLORS["bottom-right"], r1: size - cornerSize,   c1: size - cornerSize,   r2: size - 1,            c2: size - 1            },
-    { name: "top-mid",      color: ROOM_COLORS["top-mid"],      r1: 0,                   c1: edgeStart,           r2: edgeRoomSize - 1,    c2: edgeEnd             },
-    { name: "bottom-mid",   color: ROOM_COLORS["bottom-mid"],   r1: size - edgeRoomSize, c1: edgeStart,           r2: size - 1,            c2: edgeEnd             },
-    { name: "left-mid",     color: ROOM_COLORS["left-mid"],     r1: edgeStart,           c1: 0,                   r2: edgeEnd,             c2: edgeRoomSize - 1    },
-    { name: "right-mid",    color: ROOM_COLORS["right-mid"],    r1: edgeStart,           c1: size - edgeRoomSize, r2: edgeEnd,             c2: size - 1            },
-  ];
-
-  function getRoom(row: number, col: number): RectRoom | null {
-    for (const room of rooms) {
-      if (row >= room.r1 && row <= room.r2 && col >= room.c1 && col <= room.c2) return room;
-    }
-    return null;
-  }
 
   function roomCenterPercent(room: RectRoom) {
     const centerRow = (room.r1 + room.r2 + 1) / 2;
@@ -397,109 +494,187 @@ export default function BoardView({
     };
   }
 
-  return (
-    <div style={styles.wrapper}>
-      <div
-        style={{
-          ...styles.grid,
-          gridTemplateColumns: `repeat(${size}, 1fr)`,
-          gridTemplateRows:    `repeat(${size}, 1fr)`,
-        }}
-      >
-        {Array.from({ length: total }).map((_, i) => {
-          const row  = Math.floor(i / size);
-          const col  = i % size;
-          const room = getRoom(row, col);
-          const isRoom = room !== null;
-          return (
-            <div
-              key={i}
-              style={{
-                ...styles.cell,
-                background: isRoom
-                  ? room!.color
-                  : (row + col) % 2 === 0 ? "#fde4f0" : "#fff5f9",
-                border: isRoom ? "none" : "0.5px solid #f0c0d8",
-              }}
-            />
-          );
-        })}
+  const wrapperStyle: React.CSSProperties = isExpanded
+    ? {
+        position: "fixed",
+        top: "50%",
+        left: "50%",
+        transform: "translate(-50%, -50%)",
+        width: "90vmin",
+        height: "90vmin",
+        zIndex: 1001,
+      }
+    : {
+        position: "relative",
+        height: "100%",
+        width: "auto",
+        maxWidth: "100%",
+        aspectRatio: "1 / 1",
+        margin: "0 auto",
+      };
 
-        <div style={styles.decorationLayer}>
-          {rooms.map((room) => {
-            const top    = (room.r1 / size) * 100;
-            const left   = (room.c1 / size) * 100;
-            const width  = ((room.c2 - room.c1 + 1) / size) * 100;
-            const height = ((room.r2 - room.r1 + 1) / size) * 100;
+  const avatarTilePct = (1.5 / GRID_SIZE) * 100;
+
+  return (
+    <>
+      {/* Backdrop when expanded */}
+      {isExpanded && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 1000,
+            background: "rgba(10,4,20,0.72)",
+            backdropFilter: "blur(4px)",
+          }}
+          onClick={() => setIsExpanded(false)}
+        />
+      )}
+
+      <div style={wrapperStyle}>
+        <div
+          style={{
+            ...styles.grid,
+            gridTemplateColumns: `repeat(${size}, 1fr)`,
+            gridTemplateRows:    `repeat(${size}, 1fr)`,
+          }}
+        >
+          {/* Tiles */}
+          {Array.from({ length: total }).map((_, i) => {
+            const row  = Math.floor(i / size);
+            const col  = i % size;
+            const room = getRoomAt(row, col);
+            const isRoom = room !== null;
             return (
               <div
-                key={`deco-${room.name}`}
-                style={{ position:"absolute", top:`${top}%`, left:`${left}%`, width:`${width}%`, height:`${height}%`, overflow:"hidden", pointerEvents:"none" }}
-              >
-                <RoomDecoration name={room.name} />
-              </div>
+                key={i}
+                style={{
+                  ...styles.cell,
+                  background: isRoom
+                    ? room!.color
+                    : (row + col) % 2 === 0 ? "#fde4f0" : "#fff5f9",
+                  border: isRoom ? "none" : "0.5px solid #f0c0d8",
+                }}
+              />
             );
           })}
-        </div>
 
-        <div style={styles.labelsLayer}>
-          {rooms.map((room) => {
-            const label = ROOM_LABELS[room.name] ?? room.name;
-            const pos   = roomCenterPercent(room);
-            return (
-              <div key={`label-${room.name}`} style={{ ...styles.labelPill, ...pos }}>
-                {label}
-              </div>
-            );
-          })}
-        </div>
+          {/* Decoration layer */}
+          <div style={styles.decorationLayer}>
+            {ROOMS.map((room) => {
+              const top    = (room.r1 / size) * 100;
+              const left   = (room.c1 / size) * 100;
+              const width  = ((room.c2 - room.c1 + 1) / size) * 100;
+              const height = ((room.r2 - room.r1 + 1) / size) * 100;
+              return (
+                <div
+                  key={`deco-${room.name}`}
+                  style={{ position: "absolute", top: `${top}%`, left: `${left}%`, width: `${width}%`, height: `${height}%`, overflow: "hidden", pointerEvents: "none" }}
+                >
+                  <RoomDecoration name={room.name} />
+                </div>
+              );
+            })}
+          </div>
 
-        {onRoomClick && clueRoomNames.length > 0 && (
-          <div style={styles.clickLayer}>
-            {rooms
-              .filter((room) => clueRoomNames.includes(room.name))
-              .map((room) => {
-                const collected = roomsCollected.includes(room.name);
-                const canClick  = isMyTurn && !collected;
-                const top    = (room.r1 / size) * 100;
-                const left   = (room.c1 / size) * 100;
-                const width  = ((room.c2 - room.c1 + 1) / size) * 100;
-                const height = ((room.r2 - room.r1 + 1) / size) * 100;
-                return (
+          {/* Labels layer */}
+          <div style={styles.labelsLayer}>
+            {ROOMS.map((room) => {
+              const label = ROOM_LABELS[room.name] ?? room.name;
+              const pos   = roomCenterPercent(room);
+              return (
+                <div key={`label-${room.name}`} style={{ ...styles.labelPill, ...pos }}>
+                  {label}
+                </div>
+              );
+            })}
+          </div>
+
+
+          {/* Avatar layer */}
+          {showAvatar && (
+            <div style={{ position: "absolute", inset: 0, zIndex: 20, pointerEvents: "none" }}>
+              {/* Own avatar — raspberry */}
+              <div
+                style={{
+                  position: "absolute",
+                  top:  `${((avatarPos.row + 0.5) / GRID_SIZE) * 100}%`,
+                  left: `${((avatarPos.col + 0.5) / GRID_SIZE) * 100}%`,
+                  transform: "translate(-50%, -50%)",
+                  width:  `${avatarTilePct}%`,
+                  height: `${avatarTilePct}%`,
+                  borderRadius: "50%",
+                  background: "#AA336A",
+                  border: "2.5px solid rgba(255,255,255,0.92)",
+                  boxShadow: "0 2px 8px rgba(170,51,106,0.65)",
+                  transition: "top 0.1s ease, left 0.1s ease",
+                }}
+              />
+
+              {/* Other players */}
+              {Object.entries(otherPlayers)
+                .filter(([id]) => id !== mySocketId)
+                .map(([id, pos], idx) => (
                   <div
-                    key={`click-${room.name}`}
-                    role="button"
-                    tabIndex={canClick ? 0 : -1}
-                    aria-label={collected ? `Clue found in ${ROOM_LABELS[room.name] ?? room.name}` : `Search for clue in ${ROOM_LABELS[room.name] ?? room.name}`}
+                    key={id}
                     style={{
                       position: "absolute",
-                      top: `${top}%`, left: `${left}%`,
-                      width: `${width}%`, height: `${height}%`,
-                      cursor: canClick ? "pointer" : "default",
-                      opacity: collected ? 0.4 : 1,
-                      background: canClick ? "rgba(255,255,255,0.15)" : "transparent",
-                      borderRadius: 4,
+                      top:  `${((pos.row + 0.5) / GRID_SIZE) * 100}%`,
+                      left: `${((pos.col + 0.5) / GRID_SIZE) * 100}%`,
+                      transform: "translate(-50%, -50%)",
+                      width:  `${avatarTilePct}%`,
+                      height: `${avatarTilePct}%`,
+                      borderRadius: "50%",
+                      background: PLAYER_COLORS[idx % PLAYER_COLORS.length] ?? "#2ecc71",
+                      border: "2.5px solid rgba(255,255,255,0.92)",
+                      boxShadow: `0 2px 8px ${PLAYER_COLORS[idx % PLAYER_COLORS.length] ?? "#2ecc71"}99`,
+                      transition: "top 0.15s ease, left 0.15s ease",
                     }}
-                    onClick={() => canClick && onRoomClick(room.name)}
-                    onKeyDown={(e) => canClick && (e.key === "Enter" || e.key === " ") && onRoomClick(room.name)}
                   />
-                );
-              })}
-          </div>
-        )}
+                ))}
+            </div>
+          )}
+
+          {/* Zoom toggle button */}
+          <button
+            type="button"
+            aria-label={isExpanded ? "Collapse board" : "Expand board"}
+            onClick={() => setIsExpanded((v) => !v)}
+            style={{
+              position: "absolute",
+              top: 6,
+              right: 6,
+              zIndex: 25,
+              background: "#AA336A",
+              border: "none",
+              borderRadius: 6,
+              padding: "4px 6px",
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              boxShadow: "0 1px 4px rgba(0,0,0,0.35)",
+            }}
+          >
+            {isExpanded ? (
+              // Collapse icon
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="white" aria-hidden>
+                <path d="M5 16h3v3h2v-5H5v2zm3-8H5v2h5V5H8v3zm6 11h2v-3h3v-2h-5v5zm2-11V5h-2v5h5V8h-3z"/>
+              </svg>
+            ) : (
+              // Expand icon
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="white" aria-hidden>
+                <path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/>
+              </svg>
+            )}
+          </button>
+        </div>
       </div>
-    </div>
+    </>
   );
 }
 
 const styles: Record<string, React.CSSProperties> = {
-  wrapper: {
-    height: "100%",
-    width: "auto",
-    maxWidth: "100%",
-    aspectRatio: "1 / 1",
-    margin: "0 auto",
-  },
   grid: {
     width: "100%",
     height: "100%",
@@ -519,11 +694,6 @@ const styles: Record<string, React.CSSProperties> = {
     inset: 0,
     pointerEvents: "none",
     zIndex: 10,
-  },
-  clickLayer: {
-    position: "absolute",
-    inset: 0,
-    zIndex: 5,
   },
   labelPill: {
     position: "absolute",
