@@ -5,7 +5,7 @@ import tralalerGif from './assets/Tralelo idling.gif';
 import BoardView from './components/BoardView';
 import CatIcon from './components/CatIcon';
 import MinigameModal from './components/minigames/MinigameModal';
-import { getCatDisplayName, getCatAvatarColor, getCatInitial, getCatImage, DETECTIVE_CHARACTERS, type DetectiveCharacter } from './constants/cats';
+import { getCatDisplayName, getCatImage, DETECTIVE_CHARACTERS, type DetectiveCharacter } from './constants/cats';
 
 const getSocketUrl = () => {
   if (typeof window === 'undefined') return 'http://localhost:3001';
